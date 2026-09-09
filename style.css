@@ -146,6 +146,11 @@ input[type=range]::-webkit-slider-thumb:hover {
 }
 
 /* Tab active state */
+button:disabled, input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .tab-btn.active {
   border-bottom: 2px solid #10B981;
   color: #10B981;

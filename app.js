@@ -8,6 +8,15 @@ let isRunning = false;
 let animFrameId = null;
 let speedMode = 1; // 1: Normal, 5: Fast, 20: Turbo, 100: Max Train
 let autoRegenMaze = false;
+let autoTuneEnabled = false;
+let parameterController = new ParameterController();
+const tuningControls = [
+  ['rewardGoal', 'valGoal', 'goal'], ['penaltyStep', 'valStep', 'step'],
+  ['penaltyWall', 'valWall', 'wall'], ['penaltyDeadEnd', 'valDeadEnd', 'deadEnd'],
+  ['penaltyRevisit', 'valRevisit', 'revisit'], ['rewardDistance', 'valDistance', 'distanceShaping'],
+  ['paramAlpha', 'valAlpha', 'alpha'], ['paramGamma', 'valGamma', 'gamma'],
+  ['paramEpsilon', 'valEpsilon', 'epsilon']
+];
 let showHeatmap = true;
 let showPolicyArrows = true;
 let showSensors = true;
@@ -84,6 +93,11 @@ function resizeCanvas() {
 
 // Bind UI Input Sliders & Buttons
 function bindUIEvents() {
+  document.getElementById('toggleAutoTune').addEventListener('change', e => {
+    autoTuneEnabled = e.target.checked;
+    resetAutoTune();
+    syncParameterControls();
+  });
   // Reward Engine Inputs
   document.getElementById('rewardGoal').addEventListener('input', (e) => {
     agent.rewardsConfig.goal = parseFloat(e.target.value);
@@ -139,6 +153,7 @@ function bindUIEvents() {
   });
   document.getElementById('toggleAutoRegen').addEventListener('change', (e) => {
     autoRegenMaze = e.target.checked;
+    resetAutoTune();
   });
 
   // Speed Mode Buttons
@@ -156,6 +171,10 @@ function bindUIEvents() {
   document.getElementById('btnResetEpisode').addEventListener('click', resetEpisode);
   document.getElementById('btnResetQTable').addEventListener('click', resetQTable);
   document.getElementById('btnNewMaze').addEventListener('click', generateNewMaze);
+  document.getElementById('btnSaveAI').addEventListener('click', saveTraining);
+  document.getElementById('btnEvaluatePolicy').addEventListener('click', showPolicyEvaluation);
+  document.getElementById('btnLoadAI').addEventListener('click', () => document.getElementById('trainingFile').click());
+  document.getElementById('trainingFile').addEventListener('change', loadTraining);
 
   // Maze Dimensions & Types
   document.getElementById('mazeSizeSelect').addEventListener('change', generateNewMaze);
@@ -183,6 +202,49 @@ function bindUIEvents() {
   document.getElementById('btnCloseGuide').addEventListener('click', () => {
     document.getElementById('guideModal').classList.add('hidden');
   });
+}
+
+function syncParameterControls() {
+  for (const [inputId, labelId, key] of tuningControls) {
+    const value = key in agent.rewardsConfig ? agent.rewardsConfig[key] : agent[key];
+    document.getElementById(inputId).value = value;
+    document.getElementById(inputId).disabled = autoTuneEnabled;
+    document.getElementById(labelId).textContent = key === 'epsilon' ? value.toFixed(3) : value;
+  }
+  for (const id of ['btnPresetStandard', 'btnPresetStrict', 'btnPresetWallBumper', 'btnPresetGuided']) {
+    document.getElementById(id).disabled = autoTuneEnabled;
+  }
+  document.getElementById('autoTuneState').textContent = autoTuneEnabled ? 'ON' : 'OFF';
+}
+
+function resetAutoTune() {
+  clearPolicyEvaluation();
+  parameterController.resetWindow();
+  document.getElementById('autoTuneStatus').textContent = autoTuneEnabled
+    ? '실시간 관측 중 · 32스텝마다 조정 · 기존 조정 학습 유지'
+    : '자동 조정 OFF · 현재 설정 유지 · 탐험율은 기존 방식으로 감소';
+}
+
+function stepExplorer() {
+  clearPolicyEvaluation();
+  const distance = maze.bfsDistanceMap[agent.r][agent.c];
+  const result = agent.step();
+  if (!autoTuneEnabled) return;
+  const targets = parameterController.observe(distance, result, agent);
+  if (!targets) {
+    if (!Number.isFinite(distance)) document.getElementById('autoTuneStatus').textContent = '조정 대기: 도착점까지 연결된 경로가 없습니다.';
+    return;
+  }
+  for (const [inputId, , key] of tuningControls) {
+    const input = document.getElementById(inputId);
+    const target = key in agent.rewardsConfig ? agent.rewardsConfig : agent;
+    const min = Number(input.min), max = Number(input.max), step = Number(input.step);
+    const next = target[key] + 0.2 * (targets[key] - target[key]);
+    target[key] = Number(Math.min(max, Math.max(min, min + Math.round((next - min) / step) * step)).toFixed(3));
+  }
+  syncParameterControls();
+  const mode = ['탐색', '균형', '경로 단축'][parameterController.active];
+  document.getElementById('autoTuneStatus').textContent = '관측 기반 ' + mode + ' 조정 · 누적 ' + parameterController.updates + '회';
 }
 
 // Preset Configurator
@@ -225,18 +287,106 @@ function generateNewMaze() {
   const gridDim = parseInt(document.getElementById('mazeSizeSelect').value) || 11;
   const mazeType = document.getElementById('mazeTypeSelect').value || 'dfs';
 
+  const retainedSettings = explorerSettings(agent);
   maze = new Maze(gridDim, gridDim);
   maze.generate(mazeType);
   agent = new QLearningAgent(maze);
+  applyExplorerSettings(agent, retainedSettings);
 
   episodeCount = 0;
   totalWins = 0;
   metricsHistory = [];
   selectedCell = { r: maze.start.r, c: maze.start.c };
+  resetAutoTune();
+  syncParameterControls();
 
   updateUI();
   renderMaze();
   renderChart();
+}
+
+function trainingSnapshot() {
+  const { scores, counts, active, updates } = parameterController;
+  return {
+    format: 'rl-maze-training', version: 2, context: learningContext(maze),
+    agent: { settings: explorerSettings(agent), qTable: agent.qTable },
+    controller: { scores, counts, active, updates },
+    episodeCount, totalWins, metricsHistory
+  };
+}
+
+function showPolicyEvaluation() {
+  if (isRunning) togglePlayPause();
+  const result = evaluateLearnedPolicy(agent);
+  const status = document.getElementById('policyEvaluationStatus');
+  if (result.status === 'success') {
+    status.textContent = '학습 경로 ' + result.steps + '스텝 / 실제 최단 ' + result.shortest + '스텝 · ' +
+      (result.optimal ? '최단 경로 달성 (현재 시작·도착점 기준)' : '최단 경로보다 ' + (result.steps - result.shortest) + '스텝 더 이동');
+  } else {
+    const reasons = { unreachable: '도착점까지 연결된 경로 없음', loop: '학습 정책이 반복 경로에 빠짐', blocked: '이동 가능한 행동 없음', unlearned: '경로 중 아직 학습되지 않은 칸이 있음' };
+    status.textContent = '최단 경로 미확인 · ' + reasons[result.status] +
+      (Number.isFinite(result.shortest) ? ' · 실제 최단 ' + result.shortest + '스텝' : '');
+  }
+}
+
+function clearPolicyEvaluation() {
+  document.getElementById('policyEvaluationStatus').textContent = '평가 버튼으로 현재 Q-Table의 경로를 확인하세요.';
+}
+
+function saveTraining() {
+  try {
+    // JSON null explicitly represents masked (-Infinity) Q-values.
+    const text = JSON.stringify(trainingSnapshot());
+    decodeTraining(text, maze);
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `maze-ai-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    document.getElementById('trainingStatus').textContent = 'AI 저장 파일 다운로드를 요청했습니다.';
+  } catch (error) {
+    document.getElementById('trainingStatus').textContent = '저장 실패: ' + error.message;
+  }
+}
+
+let loadingTraining = false;
+async function loadTraining(event) {
+  const file = event.target.files[0];
+  if (!file || loadingTraining) return;
+  loadingTraining = true;
+  document.getElementById('btnLoadAI').disabled = true;
+  try {
+    if (file.size > 5 * 1024 * 1024) throw new Error('5MB 이하의 AI 저장 파일을 선택해 주세요.');
+    const restored = decodeTraining(await file.text(), maze);
+    if (isRunning) togglePlayPause();
+    agent = restored.agent;
+    parameterController = restored.controller;
+    episodeCount = restored.data.episodeCount;
+    totalWins = restored.data.totalWins;
+    metricsHistory = restored.data.metricsHistory;
+    selectedCell = { r: agent.r, c: agent.c };
+    document.getElementById('toggleAutoTune').checked = autoTuneEnabled;
+    document.getElementById('toggleAutoRegen').checked = autoRegenMaze;
+    syncParameterControls();
+    document.getElementById('autoTuneStatus').textContent = `조정 AI 복원 · 누적 ${parameterController.updates}회 · ${autoTuneEnabled ? 'ON' : 'OFF'}`;
+    agent.lastEvent = '저장한 학습 상태 복원 완료';
+    updateUI();
+    renderMaze();
+    renderChart();
+    clearPolicyEvaluation();
+    document.getElementById('trainingStatus').textContent = restored.compatible
+      ? '학습 기록·Q-Table 복원 완료 · 현재 미로의 시작점에서 재개합니다.'
+      : '에피소드·설정·조정 AI 복원 완료 · 환경이 달라 위치별 Q-Table은 초기화했습니다.';
+  } catch (error) {
+    document.getElementById('trainingStatus').textContent = '불러오기 실패: ' + error.message;
+  } finally {
+    event.target.value = '';
+    loadingTraining = false;
+    document.getElementById('btnLoadAI').disabled = false;
+  }
 }
 
 // Reset Current Episode
@@ -253,6 +403,7 @@ function resetQTable() {
   episodeCount = 0;
   totalWins = 0;
   metricsHistory = [];
+  resetAutoTune();
   updateUI();
   renderMaze();
   renderChart();
@@ -277,6 +428,11 @@ function togglePlayPause() {
   if (window.lucide) lucide.createIcons();
 }
 
+// Keep the existing limit through 21 x 21; allow larger maps more exploration.
+function getEpisodeStepLimit() {
+  return Math.max(400, Math.ceil(400 * maze.rows * maze.cols / (21 * 21)));
+}
+
 // Simulation Main Loop
 function runLoop() {
   if (!isRunning) return;
@@ -284,11 +440,11 @@ function runLoop() {
   const stepsPerFrame = speedMode === 100 ? 50 : speedMode;
 
   for (let i = 0; i < stepsPerFrame; i++) {
-    if (agent.isFinished || agent.steps >= 400) {
+    if (agent.isFinished || agent.steps >= getEpisodeStepLimit()) {
       finishEpisode();
       if (!isRunning) break;
     } else {
-      agent.step();
+      stepExplorer();
     }
   }
 
@@ -302,10 +458,10 @@ function runLoop() {
 
 // Single Step Simulation Button
 function stepSimulation() {
-  if (agent.isFinished || agent.steps >= 400) {
+  if (agent.isFinished || agent.steps >= getEpisodeStepLimit()) {
     finishEpisode();
   } else {
-    agent.step();
+    stepExplorer();
   }
   updateUI();
   renderMaze();
@@ -327,12 +483,13 @@ function finishEpisode() {
     metricsHistory.shift();
   }
 
-  agent.decayEpsilon();
+  if (!autoTuneEnabled) agent.decayEpsilon();
 
   if (autoRegenMaze) {
     const mazeType = document.getElementById('mazeTypeSelect').value;
     maze.generate(mazeType);
     agent.initQTable();
+    resetAutoTune();
   }
 
   agent.resetState();
@@ -341,6 +498,7 @@ function finishEpisode() {
 
 // Update UI Labels & Inspector
 function updateUI() {
+  document.getElementById('paramEpsilon').value = agent.epsilon;
   document.getElementById('valEpsilon').textContent = agent.epsilon.toFixed(3);
   document.getElementById('statEpisode').textContent = episodeCount;
   document.getElementById('statSteps').textContent = agent.steps;
@@ -414,14 +572,15 @@ function updateInspector() {
 // Interactive Canvas Click & Hover Logic
 function handleCanvasClick(e) {
   const rect = mazeCanvas.getBoundingClientRect();
-  const cellWidth = mazeCanvas.width / maze.cols;
-  const cellHeight = mazeCanvas.height / maze.rows;
+  const cellWidth = rect.width / maze.cols;
+  const cellHeight = rect.height / maze.rows;
 
   const c = Math.floor((e.clientX - rect.left) / cellWidth);
   const r = Math.floor((e.clientY - rect.top) / cellHeight);
 
   if (r >= 0 && r < maze.rows && c >= 0 && c < maze.cols) {
     selectedCell = { r, c };
+    if (editMode !== 'inspect') resetAutoTune();
 
     if (editMode === 'wall') {
       // Toggle Wall
@@ -429,6 +588,7 @@ function handleCanvasClick(e) {
         maze.grid[r][c] = maze.grid[r][c] === 1 ? 0 : 1;
         maze.computeBFSDistanceMap();
         agent.initQTable(); // Re-mask walls!
+        agent.resetState();
       }
     } else if (editMode === 'start') {
       if (!maze.isWall(r, c) && !(r === maze.goal.r && c === maze.goal.c)) {
@@ -439,6 +599,7 @@ function handleCanvasClick(e) {
     } else if (editMode === 'goal') {
       if (!maze.isWall(r, c) && !(r === maze.start.r && c === maze.start.c)) {
         maze.goal = { r, c };
+        agent.resetState();
         maze.computeBFSDistanceMap();
       }
     }
@@ -451,8 +612,8 @@ function handleCanvasClick(e) {
 function handleCanvasHover(e) {
   if (editMode !== 'inspect') return;
   const rect = mazeCanvas.getBoundingClientRect();
-  const cellWidth = mazeCanvas.width / maze.cols;
-  const cellHeight = mazeCanvas.height / maze.rows;
+  const cellWidth = rect.width / maze.cols;
+  const cellHeight = rect.height / maze.rows;
 
   const c = Math.floor((e.clientX - rect.left) / cellWidth);
   const r = Math.floor((e.clientY - rect.top) / cellHeight);

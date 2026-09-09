@@ -1,6 +1,6 @@
 /**
  * Maze Generation & Map Perception Engine
- * Supports DFS Recursive Backtracker, Prim's Algorithm, and Random Obstacle Grid with BFS Path Validation.
+ * Supports DFS, Prim, random obstacles with BFS path validation, and empty grids.
  */
 
 class Maze {
@@ -21,6 +21,8 @@ class Maze {
       this.generatePrim();
     } else if (type === 'random') {
       this.generateRandom(density);
+    } else if (type === 'empty') {
+      this.generateEmpty();
     }
     
     // Ensure start and goal are open
@@ -29,6 +31,11 @@ class Maze {
 
     // Calculate BFS distance map to goal for distance shaping rewards & optimal baseline
     this.computeBFSDistanceMap();
+  }
+
+  // Open every cell, including the border. Out-of-bounds movement stays blocked.
+  generateEmpty() {
+    this.grid = Array.from({ length: this.rows }, () => Array(this.cols).fill(0));
   }
 
   // DFS Recursive Backtracker Maze Generation

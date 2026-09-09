@@ -205,6 +205,7 @@ class QLearningAgent {
       nextR,
       nextC,
       isWallHit,
+      reachedGoal: this.reachedGoal,
       isFinished: this.isFinished,
       reachedGoal: this.reachedGoal
     };
