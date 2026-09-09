@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head>
+<script>
+window.onerror = function(msg, url, line, col, error) {
+    document.write("<h1>ERROR: " + msg + " at line " + line + ":" + col + "</h1>");
+};
+</script>
+<script src="script.js"></script>
+</head><body>
+<h1 id="success">ALL GOOD</h1>
+<script>
+if (document.getElementById('btn-start-discovery') === null && document.body.innerHTML.includes('ALL GOOD')) {
+    document.write('<h2>Script Loaded but maybe no DOM</h2>');
+}
+</script>
+</body></html>
